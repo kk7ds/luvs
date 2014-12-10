@@ -100,6 +100,35 @@ def start_video(websocket, host, port, stream='video1', **params):
                        payload=payload)
     yield from send_to_client(websocket, msg)
     client_msg = yield from read_from_client(websocket)
+    print(client_msg)
+
+
+def stop_video(websocket):
+    stream_info = {
+        "bitRateCbrAvg": None,
+        "bitRateVbrMax": None,
+        "bitRateVbrMin": None,
+        "fps": None,
+        "isCbr": False,
+        "avSerializer":{
+            "destinations":["file:///dev/null"],
+            "type":"flv",
+            "streamName":""
+        }
+    }
+    payload = {
+        "video": {"fps":  None,
+                  "bitrate": None,
+                  "video1": stream_info,
+                  "video2": None,
+                  "video3": None}
+    }
+
+    msg = make_message('ChangeVideoSettings',
+                       responseExpected=True,
+                       payload=payload)
+    yield from send_to_client(websocket, msg)
+    client_msg = yield from read_from_client(websocket)
 
 
 def heartbeat(websocket):
@@ -107,18 +136,56 @@ def heartbeat(websocket):
     yield from send_to_client(websocket, msg)
 
 
-@asyncio.coroutine
-def uvc_start_video(websocket, path):
-    yield from do_hello(websocket)
-    yield from do_auth(websocket, 'ubnt', 'ubnt')
-    yield from start_video(websocket, '192.168.201.1', 6667)
-    while True:
-        yield from heartbeat(websocket)
-        time.sleep(5)
+class NoSuchCamera(Exception):
+    pass
+
+
+class UVCWebsocketServer(object):
+    def __init__(self):
+        self._cameras = {}
+
+    def make_server(self, port, listen='0.0.0.0'):
+        return websockets.serve(self.handle_camera,
+                                listen, port)
+
+    def is_camera_managed(self, camera_mac):
+        return camera_mac in self._cameras
+
+    @asyncio.coroutine
+    def start_video(self, camera_mac, host, port):
+        try:
+            client_info, websocket = self._cameras[camera_mac]
+        except KeyError:
+            raise NoSuchCamera()
+
+        yield from start_video(websocket, host, port)
+
+    @asyncio.coroutine
+    def stop_video(self, camera_mac):
+        try:
+            client_info, websocket = self._cameras[camera_mac]
+        except KeyError:
+            raise NoSuchCamera()
+
+        yield from stop_video(websocket)
+
+    @asyncio.coroutine
+    def handle_camera(self, websocket, path):
+        client_info = yield from do_hello(websocket)
+        self._cameras[client_info['mac']] = (client_info, websocket)
+
+        print('Camera now managed: %s' % client_info['mac'])
+
+        yield from do_auth(websocket, 'ubnt', 'ubnt')
+        yield from stop_video(websocket)
+        while True:
+            yield from heartbeat(websocket)
+            yield from asyncio.sleep(5)
 
 
 if __name__ == '__main__':
-    start_server = websockets.serve(uvc_start_video, '0.0.0.0', 18443)
+    server = UVCWebsocketServer()
+    start_server = server.make_server(18443)
     asyncio.get_event_loop().run_until_complete(start_server)
     asyncio.get_event_loop().run_forever()
 
