@@ -1,4 +1,5 @@
 import json
+import ssl
 import time
 import uuid
 
@@ -145,8 +146,12 @@ class UVCWebsocketServer(object):
         self._cameras = {}
 
     def make_server(self, port, listen='0.0.0.0'):
+        context = ssl.SSLContext(ssl.PROTOCOL_SSLv23)
+        context.load_cert_chain('/etc/ssl/certs/ssl-cert-snakeoil.pem',
+                                '/etc/ssl/private/ssl-cert-snakeoil.key')
+
         return websockets.serve(self.handle_camera,
-                                listen, port)
+                                listen, port, ssl=context)
 
     def is_camera_managed(self, camera_mac):
         return camera_mac in self._cameras
