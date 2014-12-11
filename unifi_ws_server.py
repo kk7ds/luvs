@@ -28,122 +28,50 @@ def make_message(functionName, responseExpected=False,
     return message
 
 
-def read_from_client(websocket):
-    data = yield from websocket.recv()
-    return json.loads(data.decode('utf-8'))
-
-
-def send_to_client(websocket, data):
-    yield from websocket.send(json.dumps(data))
-
-
-def do_hello(websocket):
-    client_info = yield from read_from_client(websocket)
-    msg = make_message('ubnt_avclient_hello',
-                       payload={'protocolVersion': 25,
-                                'controllerName': 'unifi_video'},
-                       inResponseTo=client_info['messageId'])
-    yield from send_to_client(websocket, msg)
-    return client_info['payload']
-
-
-def do_auth(websocket, username, password):
-    # Don't know how to actually validate password yet
-    authId = uuid.uuid4().hex
-    challenge = uuid.uuid4().hex
-    msg = make_message('ubnt_avclient_auth',
-                       responseExpected=True,
-                       payload={
-                           'username': username,
-                           'stage': 0,
-                           'authId': authId,
-                           'challenge': challenge,
-                           'commonSecret': '',
-                           'hashSalt': None,
-                           'error': None,
-                           'completionCode': 2,
-                       })
-    yield from send_to_client(websocket, msg)
-    client_msg = yield from read_from_client(websocket)
-    msg['payload']['commonSecret'] = client_msg['payload']['commonSecret']
-    msg['payload']['completionCode'] = 0
-    msg['responseExpected'] = False
-    yield from send_to_client(websocket, msg)
-
-
-def start_video(websocket, host, port, stream='video1', **params):
-    stream_info = {
-        "bitRateCbrAvg": None,
-        "bitRateVbrMax": None,
-        "bitRateVbrMin": None,
-        "fps": None,
-        "isCbr": False,
-        "avSerializer":{
-            "destinations":[
-                "tcp://%s:%i?retryInterval=1&connectTimeout=30" % (
-                    host, port)],
-            "type":"flv",
-            "streamName":"vMamKDLMVvIxkX9a"
-        }
-    }
-    stream_info.update(params)
-    payload = {
-        "video": {"fps":  None,
-                  "bitrate": None,
-                  "video1": None,
-                  "video2": None,
-                  "video3": None}
-    }
-    payload['video'][stream] = stream_info
-
-    msg = make_message('ChangeVideoSettings',
-                       responseExpected=True,
-                       payload=payload)
-    yield from send_to_client(websocket, msg)
-    client_msg = yield from read_from_client(websocket)
-    print(client_msg)
-
-
-def stop_video(websocket):
-    stream_info = {
-        "bitRateCbrAvg": None,
-        "bitRateVbrMax": None,
-        "bitRateVbrMin": None,
-        "fps": None,
-        "isCbr": False,
-        "avSerializer":{
-            "destinations":["file:///dev/null"],
-            "type":"flv",
-            "streamName":""
-        }
-    }
-    payload = {
-        "video": {"fps":  None,
-                  "bitrate": None,
-                  "video1": stream_info,
-                  "video2": None,
-                  "video3": None}
-    }
-
-    msg = make_message('ChangeVideoSettings',
-                       responseExpected=True,
-                       payload=payload)
-    yield from send_to_client(websocket, msg)
-    client_msg = yield from read_from_client(websocket)
-
-
-def heartbeat(websocket):
-    msg = make_message('__av_internal____heartbeat__')
-    yield from send_to_client(websocket, msg)
-
-
 class NoSuchCamera(Exception):
     pass
+
+
+class WebSocketWrapper(object):
+    def __init__(self, websocket):
+        self.websocket = websocket
+        self.msgq = []
+
+    def recv_from_queue(self, inResponseTo=None):
+        if inResponseTo is None:
+            if self.msgq:
+                return self.msgq.pop()
+        else:
+            for i, msg in enumerate(reversed(self.msgq)):
+                if inResponseTo == msg['inResponseTo']:
+                    del self.msgq[i]
+                    return msg
+
+    @asyncio.coroutine
+    def recv(self, inResponseTo=None, blocking=True):
+        while True:
+            msg = self.recv_from_queue(inResponseTo=inResponseTo)
+            if msg:
+                return msg
+            if blocking:
+                msg = yield from self.websocket.recv()
+            else:
+                msg = self.websocket.messages.get_nowait()
+
+            if msg:
+                self.msgq.insert(0, json.loads(msg.decode()))
+            else:
+                raise Exception('client gone?')
+
+    @asyncio.coroutine
+    def send(self, msg):
+        yield from self.websocket.send(msg)
 
 
 class UVCWebsocketServer(object):
     def __init__(self):
         self._cameras = {}
+        self._msgq = []
 
     def make_server(self, port, listen='0.0.0.0'):
         context = ssl.SSLContext(ssl.PROTOCOL_SSLv23)
@@ -163,7 +91,7 @@ class UVCWebsocketServer(object):
         except KeyError:
             raise NoSuchCamera()
 
-        yield from start_video(websocket, host, port)
+        yield from self._start_video(websocket, host, port)
 
     @asyncio.coroutine
     def stop_video(self, camera_mac):
@@ -172,20 +100,152 @@ class UVCWebsocketServer(object):
         except KeyError:
             raise NoSuchCamera()
 
-        yield from stop_video(websocket)
+        yield from self._stop_video(websocket)
 
     @asyncio.coroutine
     def handle_camera(self, websocket, path):
-        client_info = yield from do_hello(websocket)
+        websocket = WebSocketWrapper(websocket)
+        client_info = yield from self.do_hello(websocket)
         self._cameras[client_info['mac']] = (client_info, websocket)
 
         print('Camera now managed: %s' % client_info['mac'])
 
-        yield from do_auth(websocket, 'ubnt', 'ubnt')
-        yield from stop_video(websocket)
+        yield from self.do_auth(websocket, 'ubnt', 'ubnt')
+        yield from self._stop_video(websocket)
         while True:
-            yield from heartbeat(websocket)
+            yield from self.heartbeat(websocket)
+            yield from self.process_status(websocket)
             yield from asyncio.sleep(5)
+
+    @asyncio.coroutine
+    def read_from_client(self, websocket, inResponseTo=None):
+        result = yield from websocket.recv(inResponseTo=inResponseTo)
+        return result
+
+    @asyncio.coroutine
+    def send_to_client(self, websocket, data):
+        _ = yield from websocket.send(json.dumps(data))
+        if data['responseExpected']:
+            response = yield from self.read_from_client(
+                websocket, inResponseTo=data['messageId'])
+            return response
+
+    @asyncio.coroutine
+    def do_hello(self, websocket):
+        client_info = yield from self.read_from_client(websocket)
+        msg = make_message('ubnt_avclient_hello',
+                           payload={'protocolVersion': 25,
+                                    'controllerName': 'unifi_video'},
+                           inResponseTo=client_info['messageId'])
+        yield from self.send_to_client(websocket, msg)
+        return client_info['payload']
+
+    @asyncio.coroutine
+    def do_auth(self, websocket, username, password):
+        # Don't know how to actually validate password yet
+        authId = uuid.uuid4().hex
+        challenge = uuid.uuid4().hex
+        msg = make_message('ubnt_avclient_auth',
+                           responseExpected=True,
+                           payload={
+                               'username': username,
+                               'stage': 0,
+                               'authId': authId,
+                               'challenge': challenge,
+                               'commonSecret': '',
+                               'hashSalt': None,
+                               'error': None,
+                               'completionCode': 2,
+                           })
+        response = yield from self.send_to_client(websocket, msg)
+        msg['payload']['commonSecret'] = response['payload']['commonSecret']
+        msg['payload']['completionCode'] = 0
+        msg['responseExpected'] = False
+        yield from self.send_to_client(websocket, msg)
+
+    @asyncio.coroutine
+    def _start_video(self, websocket, host, port, stream='video1', **params):
+        stream_info = {
+            "bitRateCbrAvg": None,
+            "bitRateVbrMax": None,
+            "bitRateVbrMin": None,
+            "fps": None,
+            "isCbr": False,
+            "avSerializer":{
+                "destinations":[
+                    "tcp://%s:%i?retryInterval=1&connectTimeout=30" % (
+                        host, port)],
+                "type":"flv",
+                "streamName":"vMamKDLMVvIxkX9a"
+            }
+        }
+        stream_info.update(params)
+        payload = {
+            "video": {"fps":  None,
+                      "bitrate": None,
+                      "video1": None,
+                      "video2": None,
+                      "video3": None}
+        }
+        payload['video'][stream] = stream_info
+
+        msg = make_message('ChangeVideoSettings',
+                           responseExpected=True,
+                           payload=payload)
+        response = yield from self.send_to_client(websocket, msg)
+        # Start sends an extra reply?
+        yield from self.read_from_client(websocket, inResponseTo=msg['messageId'])
+
+
+    @asyncio.coroutine
+    def _stop_video(self, websocket):
+        stream_info = {
+            "bitRateCbrAvg": None,
+            "bitRateVbrMax": None,
+            "bitRateVbrMin": None,
+            "fps": None,
+            "isCbr": False,
+            "avSerializer":{
+                "destinations":["file:///dev/null"],
+                "type":"flv",
+                "streamName":""
+            }
+        }
+        payload = {
+            "video": {"fps":  None,
+                      "bitrate": None,
+                      "video1": stream_info,
+                      "video2": None,
+                      "video3": None}
+        }
+
+        msg = make_message('ChangeVideoSettings',
+                           responseExpected=True,
+                           payload=payload)
+        response = yield from self.send_to_client(websocket, msg)
+        # Stop sends an extra reply?
+        yield from self.read_from_client(websocket, inResponseTo=msg['messageId'])
+
+    @asyncio.coroutine
+    def heartbeat(self, websocket):
+        msg = make_message('__av_internal____heartbeat__')
+        yield from self.send_to_client(websocket, msg)
+        if len(websocket.msgq) != 0:
+            print('%s: %s' % (len(websocket.msgq),
+                              ['%s#%s' % (x['functionName'],
+                                          x['inResponseTo'])
+                               for x in websocket.msgq]))
+
+    def process_status(self, websocket):
+        while True:
+            try:
+                msg = yield from websocket.recv(blocking=False)
+            except asyncio.queues.QueueEmpty:
+                break
+            if msg['functionName'] == '__av_internal____heartbeat__':
+                print('Received camera heartbeat')
+            elif msg['functionName'] == 'EventStreamingStatus':
+                print('Streaming status is %s' % msg['payload']['currentStatus'])
 
 
 if __name__ == '__main__':
