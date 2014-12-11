@@ -1,4 +1,5 @@
 import json
+import logging
 import ssl
 import time
 import uuid
@@ -69,9 +70,10 @@ class WebSocketWrapper(object):
 
 
 class UVCWebsocketServer(object):
-    def __init__(self):
+    def __init__(self, log=None):
         self._cameras = {}
         self._msgq = []
+        self.log = log or logging.getLogger('websocket')
 
     def make_server(self, port, listen='0.0.0.0'):
         context = ssl.SSLContext(ssl.PROTOCOL_SSLv23)
@@ -108,11 +110,13 @@ class UVCWebsocketServer(object):
         client_info = yield from self.do_hello(websocket)
         self._cameras[client_info['mac']] = (client_info, websocket)
 
-        print('Camera now managed: %s' % client_info['mac'])
+        self.log.info(
+            'Camera `%(name)s` now managed: %(mac)s @ %(ip)s' % client_info)
 
         yield from self.do_auth(websocket, 'ubnt', 'ubnt')
         yield from self._stop_video(websocket)
         while True:
+            self.log.debug('Entering loop for camera %s' % client_info['mac'])
             yield from self.heartbeat(websocket)
             yield from self.process_status(websocket)
             yield from asyncio.sleep(5)
@@ -120,10 +124,12 @@ class UVCWebsocketServer(object):
     @asyncio.coroutine
     def read_from_client(self, websocket, inResponseTo=None):
         result = yield from websocket.recv(inResponseTo=inResponseTo)
+        self.log.debug('C->S: %s' % result)
         return result
 
     @asyncio.coroutine
     def send_to_client(self, websocket, data):
+        self.log.debug('S->C: %s' % data)
         _ = yield from websocket.send(json.dumps(data))
         if data['responseExpected']:
             response = yield from self.read_from_client(
@@ -132,11 +138,13 @@ class UVCWebsocketServer(object):
 
     @asyncio.coroutine
     def do_hello(self, websocket):
+        self.log.debug('Waiting for client hello')
         client_info = yield from self.read_from_client(websocket)
         msg = make_message('ubnt_avclient_hello',
                            payload={'protocolVersion': 25,
                                     'controllerName': 'unifi_video'},
                            inResponseTo=client_info['messageId'])
+        self.log.debug('Sending server hello')
         yield from self.send_to_client(websocket, msg)
         return client_info['payload']
 
@@ -157,10 +165,12 @@ class UVCWebsocketServer(object):
                                'error': None,
                                'completionCode': 2,
                            })
+        self.log.debug('Auth challenge')
         response = yield from self.send_to_client(websocket, msg)
         msg['payload']['commonSecret'] = response['payload']['commonSecret']
         msg['payload']['completionCode'] = 0
         msg['responseExpected'] = False
+        self.log.debug('Auth response')
         yield from self.send_to_client(websocket, msg)
 
     @asyncio.coroutine
@@ -192,9 +202,10 @@ class UVCWebsocketServer(object):
         msg = make_message('ChangeVideoSettings',
                            responseExpected=True,
                            payload=payload)
+        self.log.debug('Starting %s to %s:%i' % (stream, host, port))
         response = yield from self.send_to_client(websocket, msg)
         # Start sends an extra reply?
-        yield from self.read_from_client(websocket, inResponseTo=msg['messageId'])
+        response = yield from self.read_from_client(websocket, inResponseTo=msg['messageId'])
 
 
     @asyncio.coroutine
@@ -222,16 +233,19 @@ class UVCWebsocketServer(object):
         msg = make_message('ChangeVideoSettings',
                            responseExpected=True,
                            payload=payload)
+        self.log.debug('Stopping stream')
         response = yield from self.send_to_client(websocket, msg)
         # Stop sends an extra reply?
-        yield from self.read_from_client(websocket, inResponseTo=msg['messageId'])
+        response = yield from self.read_from_client(websocket,
+                                                    inResponseTo=msg['messageId'])
 
     @asyncio.coroutine
     def heartbeat(self, websocket):
         msg = make_message('__av_internal____heartbeat__')
         yield from self.send_to_client(websocket, msg)
+        self.log.debug('Sent heartbeat')
         if len(websocket.msgq) != 0:
-            print('%s: %s' % (len(websocket.msgq),
+            self.log.debug('Message queue: %s - %s' % (len(websocket.msgq),
                               ['%s#%s' % (x['functionName'],
                                           x['inResponseTo'])
                                for x in websocket.msgq]))
@@ -243,9 +257,10 @@ class UVCWebsocketServer(object):
             except asyncio.queues.QueueEmpty:
                 break
             if msg['functionName'] == '__av_internal____heartbeat__':
-                print('Received camera heartbeat')
+                pass
+                self.log.debug('Received camera heartbeat')
             elif msg['functionName'] == 'EventStreamingStatus':
-                print('Streaming status is %s' % msg['payload']['currentStatus'])
+                self.log.debug('Streaming status is %s' % msg['payload']['currentStatus'])
 
 
 if __name__ == '__main__':

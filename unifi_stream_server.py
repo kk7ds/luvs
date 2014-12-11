@@ -1,6 +1,7 @@
 import asyncio
 import aiohttp
 from aiohttp import web
+import logging
 import socket
 import time
 
@@ -11,9 +12,13 @@ class StreamerContext(object):
 
 
 class RequestHandler(aiohttp.server.ServerHttpProtocol):
+    def __init__(self, **kwargs):
+        self._log = kwargs.pop('log')
+        super(RequestHandler, self).__init__(**kwargs)
+
     @asyncio.coroutine
     def handle_request(self, message, payload):
-        print('Request for %s' % message.path)
+        self._log.debug('GET %s' % message.path)
         camera_mac = message.path[1:]
 
         response = aiohttp.Response(self.writer, 200,
@@ -31,33 +36,29 @@ class RequestHandler(aiohttp.server.ServerHttpProtocol):
             response.write_eof()
             return
 
-        response.send_headers()
         yield from context.streamer.wait_closed()
 
 
-@asyncio.coroutine
-def init(loop):
-    srv = yield from loop.create_server(
-        lambda: RequestHandler(debug=True),
-        '0.0.0.0', 9999)
-    print('Server started')
-    return srv
-
-
 class Streamer(asyncio.Protocol):
+    def __init__(self):
+        super(Streamer, self).__init__()
+
     @classmethod
     def factory(cls, context):
         def make_thing():
             instance = cls()
             instance._context = context
+            instance.log = context.controller.log.getChild('strm')
             return instance
         return make_thing
 
     def connection_made(self, transport):
-        print('Connection from ' + str(transport.get_extra_info('peername')))
+        peername = transport.get_extra_info('peername')
+        self.log.info('Connection from %s:%i' % peername)
         self.transport = transport
         self.bytes = 0
         self.last_report = 0
+        self._context.response.send_headers()
 
     def data_received(self, data):
         try:
@@ -65,16 +66,16 @@ class Streamer(asyncio.Protocol):
             self._context.response.transport.drain()
             self.bytes += len(data)
         except socket.error:
-            print('Receiver vanished')
+            self.log.debug('Receiver vanished')
             self.transport.close()
             self._context.controller.streaming_stopped(self._context)
         except Exception as e:
-            print('ERROR WAS %s' % e)
+            self.log.error('Unexpected error: %s' % e)
             self.transport.close()
             self._context.controller.streaming_stopped(self._context)
 
         if (time.time() - self.last_report) > 10:
-            print('Proxied %i KB' % (self.bytes / 1024))
+            self.log.debug('Proxied %i KB' % (self.bytes / 1024))
             self.last_report = time.time()
 
 
@@ -90,13 +91,25 @@ class UVCController(object):
     def __init__(self, baseport=7000):
         self._cameras = {}
         self.baseport = baseport
-        self.ws_server = unifi_ws_server.UVCWebsocketServer()
+        self.log = logging.getLogger('ctrl')
+        self.log.setLevel(logging.DEBUG)
+        self.ws_server = unifi_ws_server.UVCWebsocketServer(
+            log=self.log.getChild('ws'))
+
+    @asyncio.coroutine
+    def init_server(self, loop):
+        port = 9999
+        srv = yield from loop.create_server(
+            lambda: RequestHandler(log=self.log.getChild('http'), debug=True),
+            '0.0.0.0', port)
+        self.log.info('HTTP stream server started on port %i' % port)
+        return srv
 
     def start(self):
         loop = self.loop = asyncio.get_event_loop()
         ws_server_server = loop.run_until_complete(
-            self.ws_server.make_server(18443))
-        http_server = loop.run_until_complete(init(loop))
+            self.ws_server.make_server(17443))
+        http_server = loop.run_until_complete(self.init_server(loop))
         loop.run_forever()
 
     def get_free_port(self):
@@ -118,22 +131,25 @@ class UVCController(object):
         context.camera_mac = camera_mac
         context.response = response
         context.streamer_port = self.get_free_port()
-        print('Starting streamer on port %i' % context.streamer_port)
+        self.log.debug('Starting stream listener on port %i for camera %s' % (
+            context.streamer_port, camera_mac))
         context.streamer = yield from self.loop.create_server(
             Streamer.factory(context), '0.0.0.0', context.streamer_port)
         self._cameras[camera_mac] = context
-        print('Starting %s camera streaming to port %i' % (camera_mac,
-                                                           context.streamer_port))
         yield from self.ws_server.start_video(camera_mac, '192.168.201.1',
                                               context.streamer_port)
         return context
 
     def streaming_stopped(self, context):
         context.streamer.close()
-        print('Stopping %s camera streaming' % context.camera_mac)
+        self.log.info('Stopping %s camera streaming' % context.camera_mac)
         asyncio.async(self.ws_server.stop_video(context.camera_mac))
         del self._cameras[context.camera_mac]
 
 
-controller = UVCController()
-controller.start()
+if __name__ == '__main__':
+    logging.basicConfig(level=logging.ERROR,
+                        format='%(asctime)s %(name)s/%(levelname)s: %(message)s',
+                        datefmt='%Y-%m-%dT%H:%M:%S')
+    controller = UVCController()
+    controller.start()
