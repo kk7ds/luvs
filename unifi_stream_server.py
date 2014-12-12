@@ -108,7 +108,7 @@ class UVCController(object):
     def start(self):
         loop = self.loop = asyncio.get_event_loop()
         ws_server_server = loop.run_until_complete(
-            self.ws_server.make_server(17443))
+            self.ws_server.make_server(7443))
         http_server = loop.run_until_complete(self.init_server(loop))
         loop.run_forever()
 

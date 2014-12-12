@@ -79,7 +79,7 @@ class UVCWebsocketServer(object):
         context = ssl.SSLContext(ssl.PROTOCOL_SSLv23)
         context.load_cert_chain('/etc/ssl/certs/ssl-cert-snakeoil.pem',
                                 '/etc/ssl/private/ssl-cert-snakeoil.key')
-
+        self.log.info('UVC management server started on port %i' % port)
         return websockets.serve(self.handle_camera,
                                 listen, port, ssl=context)
 
