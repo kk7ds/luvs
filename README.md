@@ -38,9 +38,14 @@ Then grab the source:
     $ source venv/bin/activate
     $ pip install asyncio websockets aiohttp
 
-Now you should be able to start the management server:
+Now you should be able to start the management server and tell it what
+the IP address of the box it's running is:
 
-    $ python unifi_stream_server.py
+    $ python unifi_stream_server.py 4.5.6.7
+
+The IP is required because that is what it tells the camera to stream
+to. If the IP you provide is not accessible to the camera, video will
+not be available.
 
 The code currently assumes the Ubuntu-provided SSL keys in /etc/ssl,
 so if you're not root and can't read those, the above will fail. You

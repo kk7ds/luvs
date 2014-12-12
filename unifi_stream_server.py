@@ -88,8 +88,9 @@ class CameraInUse(Exception):
 
 
 class UVCController(object):
-    def __init__(self, baseport=7000):
+    def __init__(self, my_ip, baseport=7000):
         self._cameras = {}
+        self.my_ip = my_ip
         self.baseport = baseport
         self.log = logging.getLogger('ctrl')
         self.log.setLevel(logging.DEBUG)
@@ -136,7 +137,7 @@ class UVCController(object):
         context.streamer = yield from self.loop.create_server(
             Streamer.factory(context), '0.0.0.0', context.streamer_port)
         self._cameras[camera_mac] = context
-        yield from self.ws_server.start_video(camera_mac, '192.168.201.1',
+        yield from self.ws_server.start_video(camera_mac, self.my_ip,
                                               context.streamer_port)
         return context
 
@@ -148,8 +149,14 @@ class UVCController(object):
 
 
 if __name__ == '__main__':
+    import sys
+
+    if len(sys.argv) < 2:
+        print('You must specify the IP of this server')
+        sys.exit(1)
+
     logging.basicConfig(level=logging.ERROR,
                         format='%(asctime)s %(name)s/%(levelname)s: %(message)s',
                         datefmt='%Y-%m-%dT%H:%M:%S')
-    controller = UVCController()
+    controller = UVCController(sys.argv[1])
     controller.start()
