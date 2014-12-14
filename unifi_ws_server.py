@@ -1,8 +1,10 @@
 import json
 import logging
+import os
 import ssl
 import time
 import uuid
+import yaml
 
 import asyncio
 import websockets
@@ -70,10 +72,11 @@ class WebSocketWrapper(object):
 
 
 class UVCWebsocketServer(object):
-    def __init__(self, log=None):
+    def __init__(self, log=None, confdir='.'):
         self._cameras = {}
         self._msgq = []
         self.log = log or logging.getLogger('websocket')
+        self.confdir = confdir
 
     def make_server(self, port, listen='0.0.0.0'):
         context = ssl.SSLContext(ssl.PROTOCOL_SSLv23)
@@ -89,16 +92,16 @@ class UVCWebsocketServer(object):
     @asyncio.coroutine
     def start_video(self, camera_mac, host, port):
         try:
-            client_info, websocket = self._cameras[camera_mac]
+            client_info, websocket, conf = self._cameras[camera_mac]
         except KeyError:
             raise NoSuchCamera()
 
-        yield from self._start_video(websocket, host, port)
+        yield from self._start_video(websocket, host, port, conf)
 
     @asyncio.coroutine
     def stop_video(self, camera_mac):
         try:
-            client_info, websocket = self._cameras[camera_mac]
+            client_info, websocket, conf = self._cameras[camera_mac]
         except KeyError:
             raise NoSuchCamera()
 
@@ -108,13 +111,26 @@ class UVCWebsocketServer(object):
     def handle_camera(self, websocket, path):
         websocket = WebSocketWrapper(websocket)
         client_info = yield from self.do_hello(websocket)
-        self._cameras[client_info['mac']] = (client_info, websocket)
+
+        conf_file = os.path.join(
+            self.confdir, '%s.yaml' % client_info['mac'])
+        if os.path.exists(conf_file):
+            with open(conf_file) as f:
+                conf = yaml.load(f.read())
+        else:
+            self.log.info('No config file for camera: %s' % conf_file)
+            conf = None
+
+        self._cameras[client_info['mac']] = (client_info, websocket, conf)
 
         self.log.info(
             'Camera `%(name)s` now managed: %(mac)s @ %(ip)s' % client_info)
 
         yield from self.do_auth(websocket, 'ubnt', 'ubnt')
         yield from self._stop_video(websocket)
+        if conf:
+            yield from self.set_osd(websocket, conf)
+            yield from self.set_isp(websocket, conf)
         while True:
             self.log.debug('Entering loop for camera %s' % client_info['mac'])
             yield from self.heartbeat(websocket)
@@ -149,6 +165,56 @@ class UVCWebsocketServer(object):
         return client_info['payload']
 
     @asyncio.coroutine
+    def set_osd(self, websocket, conf):
+        payload = {}
+        settings = {
+            'enableDate': 1,
+            'enableLogo': 1,
+            'tag': '',
+            }
+        for i in range(1, 5):
+            try:
+                stream_config = conf['osd']['stream%i' % i]
+            except KeyError:
+                stream_config = {}
+            payload['_%i' % i] = {k: stream_config.get(k, d) for
+                                  k, d in settings.items()}
+        msg = make_message('ChangeOsdSettings',
+                           payload=payload,
+                           responseExpected=True)
+        yield from self.send_to_client(websocket, msg)
+
+    @asyncio.coroutine
+    def set_isp(self, websocket, conf):
+        settings = {
+            'aeMode': 'auto',
+            'brightness': 50,
+            'contrast': 50,
+            'denoise': 50,
+            'flip': 0,
+            'focusMode': 'ztrig',
+            'focusPosition': 0,
+            'hue': 50,
+            'irLedLevel': 215,
+            'irLedMode': 'auto',
+            'mirror': 0,
+            'saturation': 50,
+            'sharpness': 50,
+            'wdr': 1,
+            'zoomPosition': 0,
+        }
+        try:
+            isp_config = conf['isp']
+        except KeyError:
+            isp_config = {}
+        payload = {k: isp_config.get(k, d)
+                   for k, d in settings.items()}
+        msg = make_message('ChangeIspSettings',
+                           payload=payload,
+                           responseExpected=True)
+        yield from self.send_to_client(websocket, msg)
+
+    @asyncio.coroutine
     def do_auth(self, websocket, username, password):
         # Don't know how to actually validate password yet
         authId = uuid.uuid4().hex
@@ -174,13 +240,18 @@ class UVCWebsocketServer(object):
         yield from self.send_to_client(websocket, msg)
 
     @asyncio.coroutine
-    def _start_video(self, websocket, host, port, stream='video1', **params):
+    def _start_video(self, websocket, host, port, conf, stream='video1', **params):
+        if conf is None:
+            vconf = {}
+        else:
+            vconf = conf.get('video', {}).get(stream, {})
+
         stream_info = {
-            "bitRateCbrAvg": None,
-            "bitRateVbrMax": None,
-            "bitRateVbrMin": None,
-            "fps": None,
-            "isCbr": False,
+            "bitRateCbrAvg": vconf.get('bitRateCbrAvg'),
+            "bitRateVbrMax": vconf.get('bitRateVbrMax'),
+            "bitRateVbrMin": vconf.get('bitRateVbrMin'),
+            "fps": vconf.get('fps'),
+            "isCbr": str(vconf.get('isCbr', 'False')).lower() == 'true',
             "avSerializer":{
                 "destinations":[
                     "tcp://%s:%i?retryInterval=1&connectTimeout=30" % (

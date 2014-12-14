@@ -17,6 +17,7 @@ Requirements
 * asyncio
 * aiohttp
 * websockets
+* pyaml
 
 Quickstart
 ----------
@@ -36,7 +37,7 @@ Then grab the source:
     $ cd luvs
     $ virtualenv --python=/python3.3 venv
     $ source venv/bin/activate
-    $ pip install asyncio websockets aiohttp
+    $ pip install asyncio websockets aiohttp pyaml
 
 Now you should be able to start the management server and tell it what
 the IP address of the box it's running is:
@@ -71,6 +72,8 @@ machine. Assuming your camera's IP is 1.2.3.4 and your host's IP is
     Warning: Permanently added '1.2.3.4' (RSA) to the list of known hosts.
     ubnt@1.2.3.4's password:
     SUCCESS
+
+Alternately, you can do this through the web interface on the camera.
 
 After a few seconds, you should see the camera check in with the
 management server:
