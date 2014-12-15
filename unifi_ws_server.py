@@ -35,6 +35,26 @@ class NoSuchCamera(Exception):
     pass
 
 
+class CameraState(object):
+    def load_config(self):
+        if os.path.exists(self.conf_file):
+            with open(self.conf_file) as f:
+                self.conf = yaml.load(f.read())
+        else:
+            self.log.info('No config file for camera: %s' % self.conf_file)
+            self.conf = {}
+        self.needs_config_reload = False
+
+    def __init__(self, client_info, websocket, conf_file):
+        self.client_info = client_info
+        self.websocket = websocket
+        self.conf_file = conf_file
+        self.camera_mac = client_info['mac']
+        self.conf = {}
+        self.streams = {}
+        self.needs_config_reload = True
+
+
 class WebSocketWrapper(object):
     def __init__(self, websocket):
         self.websocket = websocket
@@ -86,26 +106,33 @@ class UVCWebsocketServer(object):
         return websockets.serve(self.handle_camera,
                                 listen, port, ssl=context)
 
+    def reload_all_configs(self):
+        for state in self._cameras.values():
+            self.log.info('Scheduling config reload for %s' % state.camera_mac)
+            state.needs_config_reload = True
+
     def is_camera_managed(self, camera_mac):
         return camera_mac in self._cameras
 
     @asyncio.coroutine
     def start_video(self, camera_mac, host, port):
         try:
-            client_info, websocket, conf = self._cameras[camera_mac]
+            camera_state = self._cameras[camera_mac]
         except KeyError:
             raise NoSuchCamera()
 
-        yield from self._start_video(websocket, host, port, conf)
+        yield from self._start_video(camera_state, host, port)
+        camera_state.host = host
+        camera_state.port = port
 
     @asyncio.coroutine
     def stop_video(self, camera_mac):
         try:
-            client_info, websocket, conf = self._cameras[camera_mac]
+            camera_state = self._cameras[camera_mac]
         except KeyError:
             raise NoSuchCamera()
 
-        yield from self._stop_video(websocket)
+        yield from self._stop_video(camera_state)
 
     @asyncio.coroutine
     def handle_camera(self, websocket, path):
@@ -114,27 +141,25 @@ class UVCWebsocketServer(object):
 
         conf_file = os.path.join(
             self.confdir, '%s.yaml' % client_info['mac'])
-        if os.path.exists(conf_file):
-            with open(conf_file) as f:
-                conf = yaml.load(f.read())
-        else:
-            self.log.info('No config file for camera: %s' % conf_file)
-            conf = None
 
-        self._cameras[client_info['mac']] = (client_info, websocket, conf)
+        camera_state = CameraState(client_info, websocket, conf_file)
+        self._cameras[client_info['mac']] = camera_state
 
         self.log.info(
             'Camera `%(name)s` now managed: %(mac)s @ %(ip)s' % client_info)
 
         yield from self.do_auth(websocket, 'ubnt', 'ubnt')
-        yield from self._stop_video(websocket)
-        if conf:
-            yield from self.set_osd(websocket, conf)
-            yield from self.set_isp(websocket, conf)
+        yield from self._stop_video(camera_state)
+        self.log.debug('Entering loop for camera %s' % client_info['mac'])
         while True:
-            self.log.debug('Entering loop for camera %s' % client_info['mac'])
-            yield from self.heartbeat(websocket)
-            yield from self.process_status(websocket)
+            if camera_state.needs_config_reload:
+                camera_state.load_config()
+                yield from self.set_osd(camera_state)
+                yield from self.set_isp(camera_state)
+                yield from self.reconfig_streams(camera_state)
+
+            yield from self.heartbeat(camera_state)
+            yield from self.process_status(camera_state)
             yield from asyncio.sleep(5)
 
     @asyncio.coroutine
@@ -165,7 +190,7 @@ class UVCWebsocketServer(object):
         return client_info['payload']
 
     @asyncio.coroutine
-    def set_osd(self, websocket, conf):
+    def set_osd(self, camera_state):
         payload = {}
         settings = {
             'enableDate': 1,
@@ -174,7 +199,7 @@ class UVCWebsocketServer(object):
             }
         for i in range(1, 5):
             try:
-                stream_config = conf['osd']['stream%i' % i]
+                stream_config = camera_state.conf['osd']['stream%i' % i]
             except KeyError:
                 stream_config = {}
             payload['_%i' % i] = {k: stream_config.get(k, d) for
@@ -182,10 +207,10 @@ class UVCWebsocketServer(object):
         msg = make_message('ChangeOsdSettings',
                            payload=payload,
                            responseExpected=True)
-        yield from self.send_to_client(websocket, msg)
+        yield from self.send_to_client(camera_state.websocket, msg)
 
     @asyncio.coroutine
-    def set_isp(self, websocket, conf):
+    def set_isp(self, camera_state):
         settings = {
             'aeMode': 'auto',
             'brightness': 50,
@@ -204,7 +229,7 @@ class UVCWebsocketServer(object):
             'zoomPosition': 0,
         }
         try:
-            isp_config = conf['isp']
+            isp_config = camera_state.conf['isp']
         except KeyError:
             isp_config = {}
         payload = {k: isp_config.get(k, d)
@@ -212,7 +237,13 @@ class UVCWebsocketServer(object):
         msg = make_message('ChangeIspSettings',
                            payload=payload,
                            responseExpected=True)
-        yield from self.send_to_client(websocket, msg)
+        yield from self.send_to_client(camera_state.websocket, msg)
+
+    @asyncio.coroutine
+    def reconfig_streams(self, camera_state):
+        self.log.debug('Reconfiguring active streams: %s' % camera_state.streams)
+        for stream, (host, port) in camera_state.streams.items():
+            yield from self._start_video(camera_state, None, None, stream=stream)
 
     @asyncio.coroutine
     def do_auth(self, websocket, username, password):
@@ -240,11 +271,8 @@ class UVCWebsocketServer(object):
         yield from self.send_to_client(websocket, msg)
 
     @asyncio.coroutine
-    def _start_video(self, websocket, host, port, conf, stream='video1', **params):
-        if conf is None:
-            vconf = {}
-        else:
-            vconf = conf.get('video', {}).get(stream, {})
+    def _start_video(self, camera_state, host, port, stream='video1'):
+        vconf = camera_state.conf.get('video', {}).get(stream, {})
 
         stream_info = {
             "bitRateCbrAvg": vconf.get('bitRateCbrAvg'),
@@ -252,15 +280,19 @@ class UVCWebsocketServer(object):
             "bitRateVbrMin": vconf.get('bitRateVbrMin'),
             "fps": vconf.get('fps'),
             "isCbr": str(vconf.get('isCbr', 'False')).lower() == 'true',
-            "avSerializer":{
+            "avSerializer": None
+        }
+
+        if host and port:
+            stream_info['avSerializer'] = {
                 "destinations":[
                     "tcp://%s:%i?retryInterval=1&connectTimeout=30" % (
                         host, port)],
                 "type":"flv",
                 "streamName":"vMamKDLMVvIxkX9a"
             }
-        }
-        stream_info.update(params)
+            self.log.debug('Starting %s to %s:%i' % (stream, host, port))
+
         payload = {
             "video": {"fps":  None,
                       "bitrate": None,
@@ -273,14 +305,14 @@ class UVCWebsocketServer(object):
         msg = make_message('ChangeVideoSettings',
                            responseExpected=True,
                            payload=payload)
-        self.log.debug('Starting %s to %s:%i' % (stream, host, port))
-        response = yield from self.send_to_client(websocket, msg)
+        response = yield from self.send_to_client(camera_state.websocket, msg)
         # Start sends an extra reply?
-        response = yield from self.read_from_client(websocket, inResponseTo=msg['messageId'])
-
+        response = yield from self.read_from_client(camera_state.websocket,
+                                                    inResponseTo=msg['messageId'])
+        camera_state.streams[stream] = (host, port)
 
     @asyncio.coroutine
-    def _stop_video(self, websocket):
+    def _stop_video(self, camera_state):
         stream_info = {
             "bitRateCbrAvg": None,
             "bitRateVbrMax": None,
@@ -305,26 +337,30 @@ class UVCWebsocketServer(object):
                            responseExpected=True,
                            payload=payload)
         self.log.debug('Stopping stream')
-        response = yield from self.send_to_client(websocket, msg)
+        response = yield from self.send_to_client(camera_state.websocket, msg)
         # Stop sends an extra reply?
-        response = yield from self.read_from_client(websocket,
+        response = yield from self.read_from_client(camera_state.websocket,
                                                     inResponseTo=msg['messageId'])
+        try:
+            del camera_state.streams['video1']
+        except:
+            pass
 
     @asyncio.coroutine
-    def heartbeat(self, websocket):
+    def heartbeat(self, camera_state):
         msg = make_message('__av_internal____heartbeat__')
-        yield from self.send_to_client(websocket, msg)
+        yield from self.send_to_client(camera_state.websocket, msg)
         self.log.debug('Sent heartbeat')
-        if len(websocket.msgq) != 0:
-            self.log.debug('Message queue: %s - %s' % (len(websocket.msgq),
+        if len(camera_state.websocket.msgq) != 0:
+            self.log.debug('Message queue: %s - %s' % (len(camera_state.websocket.msgq),
                               ['%s#%s' % (x['functionName'],
                                           x['inResponseTo'])
-                               for x in websocket.msgq]))
+                               for x in camera_state.websocket.msgq]))
 
-    def process_status(self, websocket):
+    def process_status(self, camera_state):
         while True:
             try:
-                msg = yield from websocket.recv(blocking=False)
+                msg = yield from camera_state.websocket.recv(blocking=False)
             except asyncio.queues.QueueEmpty:
                 break
             if msg['functionName'] == '__av_internal____heartbeat__':
