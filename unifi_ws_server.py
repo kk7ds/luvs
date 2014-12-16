@@ -54,6 +54,7 @@ class CameraState(object):
         self.streams = {}
         self.needs_config_reload = True
         self.last_time_sync = 0
+        self.time_sync_interval = 120
 
 
 class WebSocketWrapper(object):
@@ -303,10 +304,6 @@ class UVCWebsocketServer(object):
         self.log.debug('Auth response')
         yield from self.send_to_client(websocket, msg)
 
-        msg = make_message('ubnt_avclient_timeSync',
-                           payload={'t1': 1418688905275, 't2': 1418688905275})
-        yield from self.send_to_client(websocket, msg)
-
     @asyncio.coroutine
     def _start_video(self, camera_state, host, port, stream='video1'):
         vconf = camera_state.conf.get('video', {}).get(stream, {})
@@ -383,6 +380,18 @@ class UVCWebsocketServer(object):
         except:
             pass
 
+    def _send_time_sync(self, camera_state, inResponseTo=0):
+        timestamp = int(time.time() * 1000)
+        msg = make_message('ubnt_avclient_timeSync',
+                           payload={'t1': timestamp,
+                                    't2': timestamp},
+                           inResponseTo=inResponseTo)
+        yield from self.send_to_client(camera_state.websocket, msg)
+        self.log.debug('Sent time sync to %s for %s' % (
+            camera_state.camera_mac,
+            time.asctime(time.localtime(timestamp / 1000))))
+        camera_state.last_time_sync = time.time()
+
     @asyncio.coroutine
     def heartbeat(self, camera_state):
         msg = make_message('__av_internal____heartbeat__')
@@ -394,15 +403,9 @@ class UVCWebsocketServer(object):
                                           x['inResponseTo'])
                                for x in camera_state.websocket.msgq]))
 
-        if (time.time() - camera_state.last_time_sync) > 3600:
-            timestamp = int(time.time() * 1000)
-            msg = make_message('ubnt_avclient_timeSync',
-                               payload={'t1': timestamp,
-                                        't2': timestamp},
-                               inResponseTo=msg['messageId'])
-            yield from self.send_to_client(camera_state.websocket, msg)
-            self.log.info('Set time on %s' % camera_state.camera_mac)
-            camera_state.last_time_sync = time.time()
+        time_since_sync = time.time() - camera_state.last_time_sync
+        if time_since_sync > camera_state.time_sync_interval:
+            yield from self._send_time_sync(camera_state)
 
     def process_status(self, camera_state):
         while True:
@@ -415,9 +418,19 @@ class UVCWebsocketServer(object):
                 self.log.debug('Received camera heartbeat')
             elif msg['functionName'] == 'EventStreamingStatus':
                 self.log.debug('Streaming status is %s' % msg['payload']['currentStatus'])
+            elif msg['functionName'] == 'ubnt_avclient_timeSync':
+                delta = msg['payload']['timeDelta']
+                self.log.debug('Camera %s reports time delta %i ms' % (
+                    camera_state.camera_mac, delta))
+                yield from self._send_time_sync(camera_state,
+                                                inResponseTo=msg['messageId'])
+                if delta != 0 and abs(delta) < 500:
+                    camera_state.time_sync_interval = 600
+                else:
+                    camera_state.time_sync_interval = 120
             else:
-                self.log.debug('Received %s message' % msg['functionName'])
-
+                self.log.debug('Received %s message: %s' % (msg['functionName'],
+                                                            msg))
 
 
 if __name__ == '__main__':
