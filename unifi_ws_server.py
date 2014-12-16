@@ -328,7 +328,7 @@ class UVCWebsocketServer(object):
                 "type":"flv",
                 "streamName":"vMamKDLMVvIxkX9a"
             }
-            self.log.debug('Starting %s to %s:%i' % (stream, host, port))
+            self.log.info('Starting %s streaming to %s:%i' % (stream, host, port))
 
         payload = {
             "video": {"fps":  None,
@@ -401,7 +401,7 @@ class UVCWebsocketServer(object):
                                         't2': timestamp},
                                inResponseTo=msg['messageId'])
             yield from self.send_to_client(camera_state.websocket, msg)
-            self.log.debug('Set time on %s' % camera_state.camera_mac)
+            self.log.info('Set time on %s' % camera_state.camera_mac)
             camera_state.last_time_sync = time.time()
 
     def process_status(self, camera_state):

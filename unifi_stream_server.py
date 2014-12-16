@@ -2,6 +2,7 @@ import asyncio
 import aiohttp
 from aiohttp import web
 import logging
+from logging import handlers
 import signal
 import socket
 import time
@@ -94,7 +95,6 @@ class UVCController(object):
         self.my_ip = my_ip
         self.baseport = baseport
         self.log = logging.getLogger('ctrl')
-        self.log.setLevel(logging.DEBUG)
         self.ws_server = unifi_ws_server.UVCWebsocketServer(
             log=self.log.getChild('ws'))
 
@@ -158,8 +158,25 @@ if __name__ == '__main__':
         print('You must specify the IP of this server')
         sys.exit(1)
 
-    logging.basicConfig(level=logging.ERROR,
-                        format='%(asctime)s %(name)s/%(levelname)s: %(message)s',
-                        datefmt='%Y-%m-%dT%H:%M:%S')
+    log_format = '%(asctime)s %(name)s/%(levelname)s: %(message)s'
+    date_format = '%Y-%m-%dT%H:%M:%S'
+
+    logging.getLogger(None).setLevel(logging.DEBUG)
+    logging.getLogger('asyncio').setLevel(logging.ERROR)
+
+    lf = logging.Formatter(log_format, datefmt=date_format)
+
+    console = logging.StreamHandler()
+    console.setLevel(logging.INFO)
+    console.setFormatter(lf)
+    logging.getLogger(None).addHandler(console)
+
+    debuglg = handlers.RotatingFileHandler('debug.log',
+                                           maxBytes=5*1024*1024,
+                                           backupCount=4)
+    debuglg.setLevel(logging.DEBUG)
+    debuglg.setFormatter(lf)
+    logging.getLogger(None).addHandler(debuglg)
+
     controller = UVCController(sys.argv[1])
     controller.start()
