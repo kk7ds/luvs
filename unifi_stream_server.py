@@ -38,7 +38,13 @@ class RequestHandler(aiohttp.server.ServerHttpProtocol):
             response.write_eof()
             return
 
-        yield from context.streamer.wait_closed()
+        while (context.streaming
+                   and controller.ws_server.is_camera_managed(camera_mac)):
+            yield from asyncio.sleep(1)
+
+        self._log.debug('Closing HTTP streaming connection for %s' % camera_mac)
+        response.write_eof()
+        context.controller.streaming_stopped(context)
 
 
 class Streamer(asyncio.Protocol):
@@ -60,21 +66,35 @@ class Streamer(asyncio.Protocol):
         self.transport = transport
         self.bytes = 0
         self.last_report = 0
-        self._context.response.send_headers()
+        if not self._context.response.is_headers_sent():
+            self._context.response.send_headers()
+
+    def _cleanup_everything(self):
+        try:
+            result = self._context.controller.streaming_stopped(self._context)
+        except:
+            self.log.exception('While stopping streaming')
+
+        try:
+            self.transport.close()
+        except:
+            pass
+
+        self.log.debug('Total data proxied: %i KB' % (self.bytes / 1024))
+
+    def connection_lost(self, exc):
+        self._cleanup_everything()
 
     def data_received(self, data):
         try:
             self._context.response.write(data)
-            self._context.response.transport.drain()
             self.bytes += len(data)
         except socket.error:
             self.log.debug('Receiver vanished')
-            self.transport.close()
-            self._context.controller.streaming_stopped(self._context)
+            self._cleanup_everything()
         except Exception as e:
-            self.log.error('Unexpected error: %s' % e)
-            self.transport.close()
-            self._context.controller.streaming_stopped(self._context)
+            self.log.exception('Unexpected error: %s' % e)
+            self._cleanup_everything()
 
         if (time.time() - self.last_report) > 10:
             self.log.debug('Proxied %i KB' % (self.bytes / 1024))
@@ -131,6 +151,7 @@ class UVCController(object):
             raise CameraInUse('Camera in use')
 
         context = StreamerContext()
+        context.streaming = True
         context.controller = self
         context.camera_mac = camera_mac
         context.response = response
@@ -145,9 +166,28 @@ class UVCController(object):
         return context
 
     def streaming_stopped(self, context):
-        context.streamer.close()
+        if not context.streaming:
+            # We've already done cleanup here
+            return
+
+        context.streaming = False
+
         self.log.info('Stopping %s camera streaming' % context.camera_mac)
-        asyncio.async(self.ws_server.stop_video(context.camera_mac))
+
+        try:
+            context.streamer.close()
+        except:
+            self.log.exception('Failed to stop streaming server')
+
+        @asyncio.coroutine
+        def stop():
+            try:
+                yield from self.ws_server.stop_video(context.camera_mac)
+            except unifi_ws_server.NoSuchCamera:
+                pass
+
+        asyncio.async(stop())
+
         del self._cameras[context.camera_mac]
 
 
@@ -163,6 +203,7 @@ if __name__ == '__main__':
 
     logging.getLogger(None).setLevel(logging.DEBUG)
     logging.getLogger('asyncio').setLevel(logging.ERROR)
+    logging.getLogger('websockets').setLevel(logging.WARNING)
 
     lf = logging.Formatter(log_format, datefmt=date_format)
 

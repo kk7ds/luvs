@@ -137,22 +137,10 @@ class UVCWebsocketServer(object):
         yield from self._stop_video(camera_state)
 
     @asyncio.coroutine
-    def handle_camera(self, websocket, path):
-        websocket = WebSocketWrapper(websocket)
-        client_info = yield from self.do_hello(websocket)
-
-        conf_file = os.path.join(
-            self.confdir, '%s.yaml' % client_info['mac'])
-
-        camera_state = CameraState(client_info, websocket, conf_file)
-        self._cameras[client_info['mac']] = camera_state
-
-        self.log.info(
-            'Camera `%(name)s` now managed: %(mac)s @ %(ip)s' % client_info)
-
-        yield from self.do_auth(websocket, 'ubnt', 'ubnt')
+    def _handle_camera(self, camera_state):
+        yield from self.do_auth(camera_state.websocket, 'ubnt', 'ubnt')
         yield from self._stop_video(camera_state)
-        self.log.debug('Entering loop for camera %s' % client_info['mac'])
+        self.log.debug('Entering loop for camera %s' % camera_state.camera_mac)
         yield from self.set_params(camera_state)
         while True:
             if camera_state.needs_config_reload:
@@ -165,6 +153,32 @@ class UVCWebsocketServer(object):
             yield from self.heartbeat(camera_state)
             yield from self.process_status(camera_state)
             yield from asyncio.sleep(5)
+
+    @asyncio.coroutine
+    def handle_camera(self, websocket, path):
+        client_info = {}
+        try:
+            websocket = WebSocketWrapper(websocket)
+            client_info = yield from self.do_hello(websocket)
+            conf_file = os.path.join(
+                self.confdir, '%s.yaml' % client_info['mac'])
+
+            camera_state = CameraState(client_info, websocket, conf_file)
+            self._cameras[client_info['mac']] = camera_state
+            self.log.info(
+                'Camera `%(name)s` now managed: %(mac)s @ %(ip)s' % client_info)
+            yield from self._handle_camera(camera_state)
+        except websockets.exceptions.InvalidState:
+            mac = client_info.get('mac')
+            if mac:
+                del self._cameras[mac]
+            self.log.warning('Camera %s disconnected' % mac)
+        except:
+            mac = client_info.get('mac')
+            if mac:
+                self.log.exception('Error during camera %s loop' % client_info['mac'])
+                del self._cameras[mac]
+            websocket.websocket.close()
 
     @asyncio.coroutine
     def read_from_client(self, websocket, inResponseTo=None):
