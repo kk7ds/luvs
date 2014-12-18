@@ -117,29 +117,31 @@ class UVCWebsocketServer(object):
         return camera_mac in self._cameras
 
     @asyncio.coroutine
-    def start_video(self, camera_mac, host, port):
+    def start_video(self, camera_mac, host, port, stream='video1'):
         try:
             camera_state = self._cameras[camera_mac]
         except KeyError:
             raise NoSuchCamera()
 
-        yield from self._start_video(camera_state, host, port)
+        yield from self._start_video(camera_state, stream, host, port)
         camera_state.host = host
         camera_state.port = port
 
     @asyncio.coroutine
-    def stop_video(self, camera_mac):
+    def stop_video(self, camera_mac, stream='video1'):
         try:
             camera_state = self._cameras[camera_mac]
         except KeyError:
             raise NoSuchCamera()
 
-        yield from self._stop_video(camera_state)
+        yield from self._stop_video(camera_state, stream)
 
     @asyncio.coroutine
     def _handle_camera(self, camera_state):
         yield from self.do_auth(camera_state.websocket, 'ubnt', 'ubnt')
-        yield from self._stop_video(camera_state)
+
+        for stream in ('video1', 'video2', 'video3'):
+            yield from self._stop_video(camera_state, stream)
         self.log.debug('Entering loop for camera %s' % camera_state.camera_mac)
         yield from self.set_params(camera_state)
         while True:
@@ -319,7 +321,7 @@ class UVCWebsocketServer(object):
         yield from self.send_to_client(websocket, msg)
 
     @asyncio.coroutine
-    def _start_video(self, camera_state, host, port, stream='video1'):
+    def _start_video(self, camera_state, stream, host, port):
         vconf = camera_state.conf.get('video', {}).get(stream, {})
 
         stream_info = {
@@ -354,13 +356,10 @@ class UVCWebsocketServer(object):
                            responseExpected=True,
                            payload=payload)
         response = yield from self.send_to_client(camera_state.websocket, msg)
-        # Start sends an extra reply?
-        response = yield from self.read_from_client(camera_state.websocket,
-                                                    inResponseTo=msg['messageId'])
         camera_state.streams[stream] = (host, port)
 
     @asyncio.coroutine
-    def _stop_video(self, camera_state):
+    def _stop_video(self, camera_state, stream):
         stream_info = {
             "bitRateCbrAvg": None,
             "bitRateVbrMax": None,
@@ -376,21 +375,19 @@ class UVCWebsocketServer(object):
         payload = {
             "video": {"fps":  None,
                       "bitrate": None,
-                      "video1": stream_info,
+                      "video1": None,
                       "video2": None,
                       "video3": None}
         }
+        payload['video'][stream] = stream_info
 
         msg = make_message('ChangeVideoSettings',
                            responseExpected=True,
                            payload=payload)
-        self.log.debug('Stopping stream')
+        self.log.debug('Stopping stream %s' % stream)
         response = yield from self.send_to_client(camera_state.websocket, msg)
-        # Stop sends an extra reply?
-        response = yield from self.read_from_client(camera_state.websocket,
-                                                    inResponseTo=msg['messageId'])
         try:
-            del camera_state.streams['video1']
+            del camera_state.streams[stream]
         except:
             pass
 

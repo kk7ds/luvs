@@ -83,7 +83,7 @@ management server:
 At this point, you should be able to hit your management host on port
 9999 to get the stream. If you have vlc:
 
-    vlc http://4.5.6.7:9999/445566001122
+    vlc http://4.5.6.7:9999/stream/445566001122/video1
 
 Caveats
 -------

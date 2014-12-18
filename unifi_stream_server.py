@@ -18,15 +18,13 @@ class RequestHandler(aiohttp.server.ServerHttpProtocol):
         self._log = kwargs.pop('log')
         super(RequestHandler, self).__init__(**kwargs)
 
-    @asyncio.coroutine
-    def handle_request(self, message, payload):
-        self._log.debug('GET %s' % message.path)
-        camera_mac = message.path[1:]
-
+    def _do_stream(self, message, payload, camera_mac, stream):
         response = aiohttp.Response(self.writer, 200,
                                     http_version=message.version)
         try:
-            context = yield from controller.stream_camera(camera_mac, response)
+            context = yield from controller.stream_camera(camera_mac,
+                                                          stream,
+                                                          response)
         except NoSuchCamera:
             response = aiohttp.Response(self.writer, 404)
             response.send_headers()
@@ -45,6 +43,23 @@ class RequestHandler(aiohttp.server.ServerHttpProtocol):
         self._log.debug('Closing HTTP streaming connection for %s' % camera_mac)
         response.write_eof()
         context.controller.streaming_stopped(context)
+
+    @asyncio.coroutine
+    def handle_request(self, message, payload):
+        self._log.debug('GET %s' % message.path)
+
+        path_elements = message.path.split('/')
+        self._log.debug('Path: %s' % path_elements)
+        if len(path_elements) == 4 and path_elements[1] == 'stream':
+            camera_mac = path_elements[2]
+            stream = path_elements[3]
+            self._log.debug('Requested stream %s for %s' % (stream,
+                                                            camera_mac))
+            yield from self._do_stream(message, payload, camera_mac, stream)
+        else:
+            response = aiohttp.Response(self.writer, 403)
+            response.send_headers()
+            response.write_eof()
 
 
 class Streamer(asyncio.Protocol):
@@ -97,7 +112,10 @@ class Streamer(asyncio.Protocol):
             self._cleanup_everything()
 
         if (time.time() - self.last_report) > 10:
-            self.log.debug('Proxied %i KB' % (self.bytes / 1024))
+            self.log.debug('Proxied %i KB for %s/%s' % (
+                self.bytes / 1024,
+                self._context.camera_mac,
+                self._context.stream))
             self.last_report = time.time()
 
 
@@ -132,7 +150,7 @@ class UVCController(object):
         loop.add_signal_handler(signal.SIGUSR1,
                                 self.ws_server.reload_all_configs)
         ws_server_server = loop.run_until_complete(
-            self.ws_server.make_server(7443))
+            self.ws_server.make_server(17443))
         http_server = loop.run_until_complete(self.init_server(loop))
         loop.run_forever()
 
@@ -143,26 +161,28 @@ class UVCController(object):
                 return i
         raise Exception('Too many ports')
 
-    def stream_camera(self, camera_mac, response):
+    def stream_camera(self, camera_mac, stream, response):
         if not self.ws_server.is_camera_managed(camera_mac):
             raise NoSuchCamera('No such camera')
 
-        if camera_mac in self._cameras:
+        if (camera_mac, stream) in self._cameras:
             raise CameraInUse('Camera in use')
 
         context = StreamerContext()
         context.streaming = True
         context.controller = self
         context.camera_mac = camera_mac
+        context.stream = stream
         context.response = response
         context.streamer_port = self.get_free_port()
         self.log.debug('Starting stream listener on port %i for camera %s' % (
             context.streamer_port, camera_mac))
         context.streamer = yield from self.loop.create_server(
             Streamer.factory(context), '0.0.0.0', context.streamer_port)
-        self._cameras[camera_mac] = context
+        self._cameras[(camera_mac, stream)] = context
         yield from self.ws_server.start_video(camera_mac, self.my_ip,
-                                              context.streamer_port)
+                                              context.streamer_port,
+                                              stream=context.stream)
         return context
 
     def streaming_stopped(self, context):
@@ -182,13 +202,14 @@ class UVCController(object):
         @asyncio.coroutine
         def stop():
             try:
-                yield from self.ws_server.stop_video(context.camera_mac)
+                yield from self.ws_server.stop_video(context.camera_mac,
+                                                     stream=context.stream)
             except unifi_ws_server.NoSuchCamera:
                 pass
 
         asyncio.async(stop())
 
-        del self._cameras[context.camera_mac]
+        del self._cameras[(context.camera_mac, context.stream)]
 
 
 if __name__ == '__main__':
