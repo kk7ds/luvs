@@ -150,7 +150,7 @@ class UVCController(object):
         loop.add_signal_handler(signal.SIGUSR1,
                                 self.ws_server.reload_all_configs)
         ws_server_server = loop.run_until_complete(
-            self.ws_server.make_server(17443))
+            self.ws_server.make_server(7443))
         http_server = loop.run_until_complete(self.init_server(loop))
         loop.run_forever()
 
