@@ -150,6 +150,7 @@ class UVCWebsocketServer(object):
                 yield from self.set_osd(camera_state)
                 yield from self.set_isp(camera_state)
                 yield from self.set_system(camera_state)
+                yield from self.set_zones(camera_state)
                 yield from self.reconfig_streams(camera_state)
 
             yield from self.heartbeat(camera_state)
@@ -296,6 +297,37 @@ class UVCWebsocketServer(object):
             yield from self._start_video(camera_state, None, None, stream=stream)
 
     @asyncio.coroutine
+    def set_zones(self, camera_state):
+        counter = 0
+        zoneconfig = {}
+        zones = camera_state.conf.get('zones', {})
+        for zone in zones.values():
+            try:
+                coords = [int(x) for x in zone.get('coords').split(',')]
+            except Exception as e:
+                self.log.error('Zone config %s for %s has invalid coords' % (
+                    zone, camera_state.camera_mac))
+                continue
+            level = int(zone.get('level', 50))
+            zoneconfig[str(counter)] = {
+                'coord': coords,
+                'level': level,
+            }
+            counter += 1
+
+        if not zoneconfig:
+            zoneconfig = {'0': {'level': 50}}
+
+        send_events = camera_state.conf.get('camera',
+                                            {}).get('motion', 'False')
+
+        msg = make_message('ChangeAnalyticsSettings',
+                           responseExpected=True,
+                           payload={'zones': zoneconfig,
+                                    'sendEvents': send_events})
+        response = yield from self.send_to_client(camera_state.websocket, msg)
+
+    @asyncio.coroutine
     def do_auth(self, websocket, username, password):
         # Don't know how to actually validate password yet
         authId = uuid.uuid4().hex
@@ -418,6 +450,34 @@ class UVCWebsocketServer(object):
         if time_since_sync > camera_state.time_sync_interval:
             yield from self._send_time_sync(camera_state)
 
+    def trigger_zm(self, camera_state, zm_conf, edge, zones):
+        if edge == 'start':
+            text = 'Motion detected'
+        else:
+            text = 'Motion stopped'
+        score = sum([x for x in zones.values()])
+        msg = '%i|%s|%i|Motion|Zones %s|%s|' % (
+            zm_conf.get('id', 0),
+            edge == 'start' and 'on' or 'off',
+            score,
+            ','.join([x for x in zones]),
+            text)
+        reader, writer = yield from asyncio.open_connection(
+            zm_conf.get('host'), zm_conf.get('port'))
+        writer.write((msg + '\n').encode())
+        writer.close()
+        self.log.debug('Triggered zoneminder: %s' % msg)
+
+    def handle_events(self, camera_state, msg):
+        edge = msg['payload']['edgeType']
+        zones = msg['payload']['triggers']
+        self.log.info('Motion %s on %s zone(s) %s' % (
+            edge, camera_state.camera_mac, ','.join(zones.keys())))
+
+        zm_conf = camera_state.conf.get('zoneminder')
+        if zm_conf:
+            yield from self.trigger_zm(camera_state, zm_conf, edge, zones)
+
     def process_status(self, camera_state):
         while True:
             try:
@@ -439,6 +499,8 @@ class UVCWebsocketServer(object):
                     camera_state.time_sync_interval = 600
                 else:
                     camera_state.time_sync_interval = 120
+            elif msg['functionName'] == 'EventAnalyticsMotion':
+                yield from self.handle_events(camera_state, msg)
             else:
                 self.log.debug('Received %s message: %s' % (msg['functionName'],
                                                             msg))
