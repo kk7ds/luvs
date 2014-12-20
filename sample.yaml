@@ -1,0 +1,24 @@
+# This should be used as a template for a camera config. Copy it to MAC.conf
+
+osd:
+  stream1:
+    enableDate: 1
+    enableLogo: 0
+isp:
+  zoomPosition: 0
+video:
+  video1:
+    fps: 10
+    bitRateVbrMin: 500000
+    bitRateVbrMax: 1000000
+camera:
+  name: Front Porch
+  motion: True
+zones:
+  zone1:
+    coords: 473,139,0,138,0,998,469,998
+    level: 50
+zoneminder:
+  host: 192.168.1.1
+  port: 6802
+  id: 1

@@ -85,6 +85,13 @@ At this point, you should be able to hit your management host on port
 
     vlc http://4.5.6.7:9999/stream/445566001122/video1
 
+See sample.yaml for per-camera configuration. Copy it like this:
+
+    cp sample.yaml 445566001122.yaml
+
+You can send SIGUSR1 to the running server to cause it to re-read the configuration
+file and reconfigure the camera on the fly.
+
 Caveats
 -------
 
