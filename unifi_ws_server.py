@@ -41,7 +41,6 @@ class CameraState(object):
             with open(self.conf_file) as f:
                 self.conf = yaml.load(f.read())
         else:
-            self.log.info('No config file for camera: %s' % self.conf_file)
             self.conf = {}
         self.needs_config_reload = False
 
@@ -147,6 +146,10 @@ class UVCWebsocketServer(object):
         while True:
             if camera_state.needs_config_reload:
                 camera_state.load_config()
+                if not camera_state.conf:
+                    self.log.warning('No config file for camera: %s' % (
+                        camera_state.camera_mac))
+
                 yield from self.set_osd(camera_state)
                 yield from self.set_isp(camera_state)
                 yield from self.set_system(camera_state)
