@@ -294,11 +294,11 @@ class UVCWebsocketServer(object):
     def reconfig_streams(self, camera_state):
         self.log.debug('Reconfiguring active streams: %s' % camera_state.streams)
         for stream, (host, port) in camera_state.streams.items():
-            yield from self._start_video(camera_state, None, None, stream=stream)
+            yield from self._start_video(camera_state, stream, None, None)
 
     @asyncio.coroutine
     def set_zones(self, camera_state):
-        counter = 0
+        counter = 1
         zoneconfig = {}
         zones = camera_state.conf.get('zones', {})
         for zone in zones.values():
@@ -471,6 +471,22 @@ class UVCWebsocketServer(object):
     def handle_events(self, camera_state, msg):
         edge = msg['payload']['edgeType']
         zones = msg['payload']['triggers']
+
+        conf_camera = camera_state.conf.get('camera', {})
+        motion_enabled = conf_camera.get('motion', False)
+        conf_zones = camera_state.conf.get('zones', {})
+        default_zone = motion_enabled and not conf_zones
+
+        if conf_zones and not default_zone:
+            try:
+                del zones['0']
+            except KeyError:
+                pass
+
+        if not zones:
+            self.log.debug('Motion detected, but not in a zone')
+            return
+
         self.log.info('Motion %s on %s zone(s) %s' % (
             edge, camera_state.camera_mac, ','.join(zones.keys())))
 
