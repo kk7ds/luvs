@@ -28,14 +28,14 @@ need the python3 PPA.
 
     $ sudo apt-add-repository ppa:fkrull/deadsnakes
     $ sudo apt-get update
-    $ sudo apt-get install python3.3 pip
+    $ sudo apt-get install python3.3 python-pip
     $ sudo pip install virtualenv 
  
 Then grab the source:
 
     $ git clone http://github.com/kk7ds/luvs
     $ cd luvs
-    $ virtualenv --python=/python3.3 venv
+    $ virtualenv --python=/usr/bin/python3.3 venv
     $ source venv/bin/activate
     $ pip install asyncio websockets aiohttp pyaml
 
