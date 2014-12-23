@@ -22,9 +22,9 @@ class RequestHandler(aiohttp.server.ServerHttpProtocol):
         response = aiohttp.Response(self.writer, 200,
                                     http_version=message.version)
         try:
-            context = yield from controller.stream_camera(camera_mac,
-                                                          stream,
-                                                          response)
+            self._context = yield from controller.stream_camera(camera_mac,
+                                                                stream,
+                                                                response)
         except NoSuchCamera:
             response = aiohttp.Response(self.writer, 404)
             response.send_headers()
@@ -36,13 +36,17 @@ class RequestHandler(aiohttp.server.ServerHttpProtocol):
             response.write_eof()
             return
 
-        while (context.streaming
+        while (self._context.streaming
                    and controller.ws_server.is_camera_managed(camera_mac)):
             yield from asyncio.sleep(1)
 
         self._log.debug('Closing HTTP streaming connection for %s' % camera_mac)
         response.write_eof()
-        context.controller.streaming_stopped(context)
+        self._context.controller.streaming_stopped(self._context)
+
+    def connection_lost(self, exc):
+        self._context.controller.streaming_stopped(self._context)
+        super(RequestHandler, self).connection_lost(exc)
 
     @asyncio.coroutine
     def handle_request(self, message, payload):
