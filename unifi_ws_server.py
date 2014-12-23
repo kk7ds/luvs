@@ -301,7 +301,7 @@ class UVCWebsocketServer(object):
 
     @asyncio.coroutine
     def set_zones(self, camera_state):
-        counter = 1
+        counter = 0
         zoneconfig = {}
         zones = camera_state.conf.get('zones', {})
         for zone in zones.values():
@@ -327,7 +327,9 @@ class UVCWebsocketServer(object):
         msg = make_message('ChangeAnalyticsSettings',
                            responseExpected=True,
                            payload={'zones': zoneconfig,
-                                    'sendEvents': send_events})
+                                    'ispFlip': False,
+                                    'ispMirror': False,
+                                    'sendEvents': send_events and 1 or 0})
         response = yield from self.send_to_client(camera_state.websocket, msg)
 
     @asyncio.coroutine
